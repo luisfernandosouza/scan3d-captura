@@ -54,6 +54,17 @@ if (-not $py) {
     exit 1
 }
 py -3 -m pip install --upgrade -r (Join-Path $root "requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "Falha ao instalar as bibliotecas Python (numpy, plyfile)." }
+
+# pye57 so e necessario para exportar .e57 (opcional). Pode nao ter versao pronta
+# para o Python mais recente; nesse caso o resto continua funcionando.
+$ErrorActionPreference = "Continue"
+py -3 -m pip install --upgrade --only-binary=:all: pye57
+$pyeOk = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = "Stop"
+if (-not $pyeOk) {
+    Write-Host "[aviso] Exportacao E57 indisponivel nesta versao do Python. O modelo para o Blender funciona normalmente."
+}
 
 Write-Host ""
 Write-Host "Tudo pronto. Para processar, arraste o .zip da captura para processar.bat"

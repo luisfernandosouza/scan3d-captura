@@ -337,9 +337,12 @@ def collect(mvs: Path, dest: Path, want_e57: bool) -> list[str]:
         shutil.copy2(dense_ply, dest / "nuvem_densa.ply")
         produced.append("nuvem_densa.ply")
         if want_e57:
-            log("Exportando nuvem de pontos E57")
-            export_e57(dense_ply, dest / "nuvem_densa.e57")
-            produced.append("nuvem_densa.e57")
+            try:
+                log("Exportando nuvem de pontos E57")
+                export_e57(dense_ply, dest / "nuvem_densa.e57")
+                produced.append("nuvem_densa.e57")
+            except ImportError:
+                log("  E57 indisponível: a biblioteca pye57 não está instalada neste Python.")
     return produced
 
 
