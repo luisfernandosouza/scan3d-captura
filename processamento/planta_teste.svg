@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="460" viewBox="0 0 560 460" font-family="Arial" font-size="14">
+<rect width="100%" height="100%" fill="white"/>
+<line x1="80.0" y1="80.0" x2="80.0" y2="380.0" stroke="black" stroke-width="8" stroke-linecap="square"/>
+<text x="102.0" y="230.0" fill="#1a56db" transform="rotate(90 102.0 230.0)" text-anchor="middle">3.00 m</text>
+<line x1="80.0" y1="180.3" x2="80.0" y2="260.3" stroke="#d97706" stroke-width="10"/>
+<text x="80.0" y="250.3" fill="#d97706" text-anchor="middle" font-size="12">porta 0.80×2.10</text>
+<line x1="480.0" y1="80.0" x2="480.0" y2="380.0" stroke="black" stroke-width="8" stroke-linecap="square"/>
+<text x="502.0" y="230.0" fill="#1a56db" transform="rotate(90 502.0 230.0)" text-anchor="middle">3.00 m</text>
+<line x1="80.0" y1="80.0" x2="480.0" y2="80.0" stroke="black" stroke-width="8" stroke-linecap="square"/>
+<text x="280.0" y="66.0" fill="#1a56db" text-anchor="middle">4.00 m</text>
+<line x1="220.6" y1="80.0" x2="339.6" y2="80.0" stroke="#0891b2" stroke-width="10"/>
+<text x="280.1" y="110.0" fill="#0891b2" text-anchor="middle" font-size="12">janela 1.19×1.00</text>
+<line x1="80.0" y1="380.0" x2="480.0" y2="380.0" stroke="black" stroke-width="8" stroke-linecap="square"/>
+<text x="280.0" y="366.0" fill="#1a56db" text-anchor="middle">4.00 m</text>
+<text x="10" y="450" fill="#555" font-size="12">Planta gerada pelo Scan3D: medidas em metros, pela nuvem de pontos capturada</text>
+</svg>

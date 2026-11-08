@@ -40,6 +40,24 @@ Dê dois cliques em `instalar_ia.bat` (uma vez, uns 5 GB). A partir daí, o proc
 Para refazer só a escala e a parte densa de uma captura já processada, sem repetir a comparação de fotos:
 `processar.bat quarto.zip --reaproveitar`
 
+## Planta baixa (passo 3)
+
+Depois de processar, rode no Prompt de Comando, dentro desta pasta:
+
+    planta.bat quarto
+
+Ele lê a nuvem de pontos densa, acha piso, teto, paredes, portas e janelas só
+pela geometria capturada e grava em `resultados\quarto\`:
+
+- `planta.svg`: planta com cotas (abre no navegador)
+- `planta.dxf`: a mesma planta para AutoCAD/LibreCAD (camadas PAREDES, ABERTURAS, COTAS)
+- `ambiente.json`: pé-direito, comprimento de cada parede e tamanho de cada abertura
+
+A escala da IA (`escala_ia.json`) é aplicada sozinha. Para forçar outra:
+`planta.bat quarto --escala 0.397`. A planta supõe paredes em ângulo reto.
+Um móvel encostado na parede esconde o que está atrás, então uma abertura
+marcada com confiança "baixa" deve ser conferida.
+
 ## Fidelidade
 
 - A malha é gerada sem fechar buracos: o que não foi fotografado fica vazio, nada é inventado.
