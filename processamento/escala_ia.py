@@ -35,11 +35,36 @@ def _upright_turns(r_w2c: np.ndarray) -> int:
     return 1 if ux > 0 else 3
 
 
+def load_model(log=print):
+    """Carrega o modelo passo a passo (cada passo no log, para achar falhas)."""
+    import os
+    import torch
+    use_cuda = torch.cuda.is_available() and os.environ.get("SCAN3D_IA_CPU") != "1"
+    device = torch.device("cuda" if use_cuda else "cpu")
+    log(f"  IA de profundidade: {MODEL_ID} ({'placa de vídeo' if use_cuda else 'CPU'})")
+    log("  passo 1/4: importando transformers")
+    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+    log("  passo 2/4: carregando o processador de imagens")
+    processor = AutoImageProcessor.from_pretrained(MODEL_ID)
+    log("  passo 3/4: carregando os pesos do modelo")
+    model = AutoModelForDepthEstimation.from_pretrained(MODEL_ID, use_safetensors=True)
+    log("  passo 4/4: enviando o modelo para " + str(device))
+    model = model.to(device).eval()
+
+    def run(image):
+        inputs = processor(images=image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            depth = model(**inputs).predicted_depth
+        return {"predicted_depth": depth[0].cpu()}
+
+    log("  modelo pronto")
+    return run
+
+
 def estimate_scale(model_dir: Path, image_dir: Path, read_txt_model, quat_to_rot,
                    max_images: int = 60, log=print) -> tuple[float | None, dict]:
     import torch
     from PIL import Image
-    from transformers import pipeline
 
     images, points = read_txt_model(model_dir)
     pts = {int(pid): xyz for pid, xyz, _ in points}
@@ -47,9 +72,7 @@ def estimate_scale(model_dir: Path, image_dir: Path, read_txt_model, quat_to_rot
     if len(ids) > max_images:
         ids = [ids[i] for i in np.linspace(0, len(ids) - 1, max_images).astype(int)]
 
-    device = 0 if torch.cuda.is_available() else -1
-    log(f"  IA de profundidade: {MODEL_ID} ({'placa de vídeo' if device == 0 else 'CPU'})")
-    pipe = pipeline("depth-estimation", model=MODEL_ID, device=device)
+    pipe = load_model(log)
 
     per_image = []
     for n, iid in enumerate(ids, 1):
