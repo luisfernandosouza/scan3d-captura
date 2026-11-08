@@ -480,6 +480,28 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
 
 # --------------------------------------------------------------------- OpenMVS
 
+def normalize_mesh(src: Path, dst: Path) -> None:
+    """Regrava a malha do COLMAP como PLY só de triângulos, no formato que o OpenMVS lê."""
+    from plyfile import PlyData, PlyElement
+
+    ply = PlyData.read(str(src))
+    v = ply["vertex"]
+    verts = np.empty(len(v.data), dtype=[("x", "f4"), ("y", "f4"), ("z", "f4")])
+    for c in ("x", "y", "z"):
+        verts[c] = v[c]
+    faces_el = ply["face"]
+    key = [n for n in faces_el.data.dtype.names if "vertex" in n][0]
+    tris = []
+    for poly in faces_el[key]:
+        poly = list(poly)
+        for i in range(1, len(poly) - 1):  # leque: polígono vira triângulos
+            tris.append((poly[0], poly[i], poly[i + 1]))
+    faces = np.empty(len(tris), dtype=[("vertex_indices", "i4", (3,))])
+    faces["vertex_indices"] = np.asarray(tris, dtype=np.int32).reshape(-1, 3)
+    PlyData([PlyElement.describe(verts, "vertex"), PlyElement.describe(faces, "face")],
+            text=False, byte_order="<").write(str(dst))
+
+
 def texture_mesh(texture: str, scene: Path, mesh: Path, mvs: Path, decimate: float) -> None:
     out = mvs / "modelo.obj"
     base = [texture, "-i", scene, "-m", mesh, "-o", out, "-w", mvs, "--export-type", "obj"]
@@ -522,11 +544,22 @@ def run_dense_gpu(dense: Path, work: Path, detalhe: int) -> Path | None:
         return None
 
     log("Denso 4/4: aplicando textura das fotos")
+    texture_only(dense, mvs, detalhe)
+    return mvs
+
+
+def texture_only(dense: Path, mvs: Path, detalhe: int) -> None:
     iface = find_tool("InterfaceCOLMAP")
     texture = find_tool("TextureMesh")
-    run([iface, "-i", dense, "-o", mvs / "cena.mvs", "--image-folder", dense / "images"], cwd=mvs)
-    texture_mesh(texture, mvs / "cena.mvs", mesh, mvs, {0: 1.0, 1: 0.5, 2: 0.25}[detalhe])
-    return mvs
+    mvs.mkdir(exist_ok=True)
+    if not (mvs / "cena.mvs").is_file():
+        run([iface, "-i", dense, "-o", mvs / "cena.mvs", "--image-folder", dense / "images"], cwd=mvs)
+    if (dense / "fused.ply").is_file() and not (mvs / "cena_densa.ply").is_file():
+        shutil.copy2(dense / "fused.ply", mvs / "cena_densa.ply")
+    tri = mvs / "malha_tri.ply"
+    normalize_mesh(dense / "malha.ply", tri)
+    shutil.copy2(tri, mvs / "modelo_sem_textura.ply")
+    texture_mesh(texture, mvs / "cena.mvs", tri, mvs, {0: 1.0, 1: 0.5, 2: 0.25}[detalhe])
 
 
 def run_openmvs(dense: Path, work: Path, resolution_level: int) -> Path:
@@ -581,7 +614,7 @@ def collect(mvs: Path, dest: Path, want_e57: bool) -> list[str]:
     dest.mkdir(parents=True, exist_ok=True)
     produced = []
     for f in mvs.iterdir():
-        if f.name.startswith("modelo") and f.suffix.lower() in (".obj", ".mtl", ".png", ".jpg"):
+        if f.name.startswith("modelo") and f.suffix.lower() in (".obj", ".mtl", ".png", ".jpg", ".ply"):
             shutil.copy2(f, dest / f.name)
             produced.append(f.name)
     dense_ply = mvs / "cena_densa.ply"
@@ -604,6 +637,8 @@ def main() -> None:
     ap.add_argument("--e57", action="store_true", help="também exporta a nuvem de pontos em E57")
     ap.add_argument("--usar-poses-arcore", action="store_true",
                     help="usa as posições do ARCore direto (mais rápido, só se o rastreamento foi bom)")
+    ap.add_argument("--so-textura", action="store_true",
+                    help="reaproveita nuvem densa e malha já prontas e refaz só a textura")
     ap.add_argument("--so-denso", action="store_true",
                     help="reaproveita as posições de um processamento anterior e refaz só a parte densa")
     ap.add_argument("--reaproveitar", action="store_true",
@@ -637,7 +672,14 @@ def main() -> None:
     if scale != 1.0:
         log(f"Correção de escala pela trena: fator {scale:.4f}")
 
-    if args.so_denso and (work / "denso" / "sparse").is_dir():
+    if args.so_textura and (work / "denso" / "malha.ply").is_file():
+        log("Reaproveitando nuvem densa e malha: refazendo só a textura")
+        old = ROOT / "resultados" / name / "relatorio.json"
+        colmap_info = json.loads(old.read_text(encoding="utf-8")).get("colmap", {}) if old.is_file() else {}
+        mvs = work / "mvs"
+        texture_only(work / "denso", mvs, args.detalhe)
+        dense = None
+    elif args.so_denso and (work / "denso" / "sparse").is_dir():
         log("Reaproveitando as posições já calculadas (pulando o COLMAP)")
         dense = work / "denso"
         old = ROOT / "resultados" / name / "relatorio.json"
@@ -651,8 +693,9 @@ def main() -> None:
         dense, colmap_info = run_colmap(cap, frames, work, scale * args.escala,
                                         args.usar_poses_arcore, not args.sem_ia,
                                         reuse=args.reaproveitar)
-    mvs = None if args.cpu else run_dense_gpu(dense, work, args.detalhe)
-    if mvs is None:
+    if dense is not None:
+        mvs = None if args.cpu else run_dense_gpu(dense, work, args.detalhe)
+    if dense is not None and mvs is None:
         if not args.cpu:
             log("[aviso] Etapa densa na placa de vídeo falhou; usando o OpenMVS na CPU.")
         mvs = run_openmvs(dense, work, args.detalhe)
