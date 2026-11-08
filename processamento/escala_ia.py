@@ -70,20 +70,23 @@ def load_model(log=print):
     device = torch.device("cuda" if use_cuda else "cpu")
     log(f"  IA de profundidade: {MODEL_ID} ({'placa de vídeo' if use_cuda else 'CPU'})")
     log("  passo 1/4: importando transformers")
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+    from transformers import AutoImageProcessor
     log("  passo 2/4: carregando o processador de imagens")
     processor = AutoImageProcessor.from_pretrained(MODEL_ID)
     log("  passo 3/4: carregando os pesos do modelo (leitor em Python puro)")
     from huggingface_hub import hf_hub_download
-    from transformers import AutoConfig
     weights = hf_hub_download(MODEL_ID, "model.safetensors")
-    config = AutoConfig.from_pretrained(MODEL_ID)
-    model = AutoModelForDepthEstimation.from_config(config)
     state = read_safetensors(Path(weights))
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:
-        raise RuntimeError(f"pesos faltando no arquivo: {missing[:5]}")
     log(f"  pesos lidos: {len(state)} tensores")
+    # O transformers renomeia sozinho os pesos de versões antigas quando
+    # recebe o state_dict pronto (sem abrir o arquivo com a biblioteca nativa).
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(MODEL_ID)
+    from transformers import DepthAnythingForDepthEstimation
+    model, info = DepthAnythingForDepthEstimation.from_pretrained(
+        None, config=config, state_dict=state, output_loading_info=True)
+    if info.get("missing_keys"):
+        raise RuntimeError(f"pesos faltando: {list(info['missing_keys'])[:5]}")
     log("  passo 4/4: enviando o modelo para " + str(device))
     model = model.to(device).eval()
 
