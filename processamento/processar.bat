@@ -12,5 +12,5 @@ if errorlevel 1 (
     echo Instalando bibliotecas Python que faltam...
     "%PY%" -m pip install -r requirements.txt
 )
-"%PY%" processar.py "%~1"
+"%PY%" processar.py %*
 pause

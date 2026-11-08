@@ -432,7 +432,57 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
 
 # --------------------------------------------------------------------- OpenMVS
 
+def texture_mesh(texture: str, scene: Path, mesh: Path, mvs: Path, decimate: float) -> None:
+    out = mvs / "modelo.obj"
+    base = [texture, "-i", scene, "-m", mesh, "-o", out, "-w", mvs, "--export-type", "obj"]
+    if decimate < 1 and run(base + ["--decimate", str(decimate)], cwd=mvs, allow_fail=True):
+        return
+    run(base, cwd=mvs)
+
+
+def run_dense_gpu(dense: Path, work: Path, detalhe: int) -> Path | None:
+    """
+    Nuvem densa e malha com o COLMAP (CUDA, placa de vídeo) e textura com o OpenMVS.
+    Devolve a pasta com o resultado, ou None se alguma etapa do COLMAP falhar.
+    """
+    colmap = find_tool("colmap")
+    mvs = work / "mvs"
+    if mvs.exists():
+        shutil.rmtree(mvs)
+    mvs.mkdir()
+    max_size = {0: 3000, 1: 2000, 2: 1000}[detalhe]
+
+    log("Denso 1/4: profundidade de cada foto (placa de vídeo, é a etapa mais longa)")
+    if not run([colmap, "patch_match_stereo", "--workspace_path", dense,
+                "--workspace_format", "COLMAP",
+                "--PatchMatchStereo.max_image_size", str(max_size),
+                "--PatchMatchStereo.geom_consistency", "true"], allow_fail=True):
+        return None
+
+    log("Denso 2/4: juntando tudo numa nuvem de pontos")
+    fused = dense / "fused.ply"
+    if not run([colmap, "stereo_fusion", "--workspace_path", dense,
+                "--workspace_format", "COLMAP", "--input_type", "geometric",
+                "--output_path", fused], allow_fail=True):
+        return None
+    shutil.copy2(fused, mvs / "cena_densa.ply")
+
+    log("Denso 3/4: gerando a malha (Delaunay, não inventa superfícies)")
+    mesh = dense / "malha.ply"
+    if not run([colmap, "delaunay_mesher", "--input_path", dense, "--input_type", "dense",
+                "--output_path", mesh], allow_fail=True):
+        return None
+
+    log("Denso 4/4: aplicando textura das fotos")
+    iface = find_tool("InterfaceCOLMAP")
+    texture = find_tool("TextureMesh")
+    run([iface, "-i", dense, "-o", mvs / "cena.mvs", "--image-folder", dense / "images"], cwd=mvs)
+    texture_mesh(texture, mvs / "cena.mvs", mesh, mvs, {0: 1.0, 1: 0.5, 2: 0.25}[detalhe])
+    return mvs
+
+
 def run_openmvs(dense: Path, work: Path, resolution_level: int) -> Path:
+    """Caminho alternativo, todo no OpenMVS (a nuvem densa roda na CPU)."""
     mvs = work / "mvs"
     mvs.mkdir(exist_ok=True)
     iface = find_tool("InterfaceCOLMAP")
@@ -443,7 +493,7 @@ def run_openmvs(dense: Path, work: Path, resolution_level: int) -> Path:
     log("OpenMVS 1/4: importando cena")
     run([iface, "-i", dense, "-o", mvs / "cena.mvs", "--image-folder", dense / "images"], cwd=mvs)
 
-    log("OpenMVS 2/4: nuvem de pontos densa (usa a placa de vídeo, pode demorar)")
+    log("OpenMVS 2/4: nuvem de pontos densa (CPU, pode demorar)")
     run([densify, "-i", mvs / "cena.mvs", "-o", mvs / "cena_densa.mvs", "-w", mvs,
          "--resolution-level", str(resolution_level)], cwd=mvs)
 
@@ -452,13 +502,8 @@ def run_openmvs(dense: Path, work: Path, resolution_level: int) -> Path:
          "--close-holes", "0"], cwd=mvs)
 
     log("OpenMVS 4/4: aplicando textura das fotos")
-    out = mvs / "modelo.obj"
-    ok = run([texture, "-i", mvs / "cena_densa.mvs", "-m", mvs / "malha.ply", "-o", out,
-              "-w", mvs, "--export-type", "obj"], cwd=mvs, allow_fail=True)
-    if not ok:
-        # Versões antigas do OpenMVS leem a malha direto do .mvs.
-        run([texture, "-i", mvs / "malha.mvs", "-o", out, "-w", mvs,
-             "--export-type", "obj"], cwd=mvs)
+    texture_mesh(texture, mvs / "cena_densa.mvs", mvs / "malha.ply", mvs,
+                 {0: 1.0, 1: 0.5, 2: 0.25}[resolution_level])
     return mvs
 
 
@@ -511,6 +556,12 @@ def main() -> None:
     ap.add_argument("--e57", action="store_true", help="também exporta a nuvem de pontos em E57")
     ap.add_argument("--usar-poses-arcore", action="store_true",
                     help="usa as posições do ARCore direto (mais rápido, só se o rastreamento foi bom)")
+    ap.add_argument("--so-denso", action="store_true",
+                    help="reaproveita as posições de um processamento anterior e refaz só a parte densa")
+    ap.add_argument("--cpu", action="store_true",
+                    help="usa o OpenMVS na CPU para a nuvem densa (mais lento)")
+    ap.add_argument("--escala", type=float, default=1.0,
+                    help="multiplica o tamanho do modelo (para corrigir a escala com uma medida conhecida)")
     ap.add_argument("--detalhe", type=int, default=1, choices=[0, 1, 2],
                     help="0 = máximo (mais lento), 1 = padrão, 2 = rápido")
     args = ap.parse_args()
@@ -534,8 +585,23 @@ def main() -> None:
     if scale != 1.0:
         log(f"Correção de escala pela trena: fator {scale:.4f}")
 
-    dense, colmap_info = run_colmap(cap, frames, work, scale, args.usar_poses_arcore)
-    mvs = run_openmvs(dense, work, args.detalhe)
+    if args.so_denso and (work / "denso" / "sparse").is_dir():
+        log("Reaproveitando as posições já calculadas (pulando o COLMAP)")
+        dense = work / "denso"
+        old = ROOT / "resultados" / name / "relatorio.json"
+        colmap_info = json.loads(old.read_text(encoding="utf-8")).get("colmap", {}) if old.is_file() else {}
+        # Limpa resultados densos anteriores do COLMAP, se houver.
+        shutil.rmtree(dense / "stereo" / "depth_maps", ignore_errors=True)
+        shutil.rmtree(dense / "stereo" / "normal_maps", ignore_errors=True)
+        (dense / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
+        (dense / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
+    else:
+        dense, colmap_info = run_colmap(cap, frames, work, scale * args.escala, args.usar_poses_arcore)
+    mvs = None if args.cpu else run_dense_gpu(dense, work, args.detalhe)
+    if mvs is None:
+        if not args.cpu:
+            log("[aviso] Etapa densa na placa de vídeo falhou; usando o OpenMVS na CPU.")
+        mvs = run_openmvs(dense, work, args.detalhe)
 
     dest = ROOT / "resultados" / name
     produced = collect(mvs, dest, args.e57)
