@@ -1,0 +1,3 @@
+numpy>=1.24
+plyfile>=1.0
+pye57>=0.4
