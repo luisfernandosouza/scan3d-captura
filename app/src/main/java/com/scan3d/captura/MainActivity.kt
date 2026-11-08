@@ -202,9 +202,9 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         depthSupported = s.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
         val config = Config(s).apply {
-            // Foco fixo mantém os parâmetros da lente estáveis entre fotos,
-            // o que melhora a fotogrametria.
-            focusMode = Config.FocusMode.FIXED
+            // Foco automático: o rastreamento do ARCore fica mais estável.
+            // A fotogrametria no PC recalcula a lente de qualquer forma.
+            focusMode = Config.FocusMode.AUTO
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             lightEstimationMode = Config.LightEstimationMode.DISABLED
@@ -320,8 +320,17 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             .setPositiveButton("Salvar") { _, _ ->
                 val cm = input.text.toString().replace(',', '.').toDoubleOrNull()
                 if (cm != null && cm > 0 && recording) {
-                    writer.addCalibration(a, b, arcoreMeters, cm / 100.0)
-                    Toast.makeText(this, "Medida salva.", Toast.LENGTH_SHORT).show()
+                    val ratio = (cm / 100.0) / arcoreMeters
+                    if (ratio < 0.7 || ratio > 1.4) {
+                        Toast.makeText(
+                            this,
+                            "Medida muito diferente da do ARCore (rastreamento perdido?). Não foi salva: tente de novo.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        writer.addCalibration(a, b, arcoreMeters, cm / 100.0)
+                        Toast.makeText(this, "Medida salva.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             .setNegativeButton("Pular", null)
@@ -406,6 +415,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val status = when {
             !recording -> "Pronto. Toque em Iniciar e ande devagar pelo ambiente."
             measuring -> "Modo medida: toque nos dois pontos medidos com a trena."
+            keyframes.unstable -> "Estabilizando rastreamento… aponte para áreas com detalhes."
             keyframes.tooFast -> "Mais devagar! Movimento rápido borra as fotos."
             else -> "Gravando: ${writer.count} fotos"
         }

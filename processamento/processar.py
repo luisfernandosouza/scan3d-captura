@@ -151,25 +151,147 @@ def load_frames(cap: Path) -> list[dict]:
 
 
 def scale_from_calibration(cap: Path) -> tuple[float, list[dict]]:
-    """Fator de escala a partir das medidas de trena (mediana de real/ARCore)."""
+    """
+    Correção de escala pelas medidas de trena (mediana de real/ARCore).
+    Medidas absurdas (ARCore perdido) são descartadas.
+    """
     path = cap / "calibration.json"
     if not path.is_file():
         return 1.0, []
     data = json.loads(path.read_text(encoding="utf-8"))
-    meas = [m for m in data.get("measurements", []) if m.get("arcore_m", 0) > 0.05 and m.get("real_m", 0) > 0]
-    if not meas:
-        return 1.0, []
-    ratios = sorted(m["real_m"] / m["arcore_m"] for m in meas)
-    scale = float(np.median(ratios))
-    report = []
-    for m in meas:
-        report.append({
-            "real_cm": round(m["real_m"] * 100, 1),
-            "arcore_cm": round(m["arcore_m"] * 100, 1),
-            "corrigido_cm": round(m["arcore_m"] * scale * 100, 1),
-            "erro_restante_cm": round((m["arcore_m"] * scale - m["real_m"]) * 100, 1),
-        })
-    return scale, report
+    report, ratios = [], []
+    for m in data.get("measurements", []):
+        a, r = m.get("arcore_m", 0), m.get("real_m", 0)
+        if a <= 0.05 or r <= 0:
+            continue
+        ok = 0.7 <= r / a <= 1.4
+        if ok:
+            ratios.append(r / a)
+        report.append({"real_cm": round(r * 100, 1), "arcore_cm": round(a * 100, 1),
+                       "usada": ok})
+    if not ratios:
+        return 1.0, report
+    return float(np.median(ratios)), report
+
+
+# ------------------------------------------------------- modelo COLMAP em texto
+
+def read_txt_model(d: Path):
+    images = {}
+    lines = [l for l in (d / "images.txt").read_text().splitlines() if not l.startswith("#")]
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip():
+            i += 1
+            continue
+        parts = lines[i].split()
+        iid = int(parts[0])
+        q = [float(x) for x in parts[1:5]]
+        t = np.array([float(x) for x in parts[5:8]])
+        images[iid] = {"q": q, "t": t, "cam": parts[8], "name": " ".join(parts[9:]),
+                       "pts": lines[i + 1] if i + 1 < len(lines) else ""}
+        i += 2
+    points = []
+    for l in (d / "points3D.txt").read_text().splitlines():
+        if l.startswith("#") or not l.strip():
+            continue
+        parts = l.split()
+        points.append((parts[0], np.array([float(x) for x in parts[1:4]]), parts[4:]))
+    return images, points
+
+
+def camera_center(img: dict) -> np.ndarray:
+    qw, qx, qy, qz = img["q"]
+    r = quat_to_rot(qx, qy, qz, qw)
+    return -r.T @ img["t"]
+
+
+def write_transformed_model(src: Path, dst: Path, scale: float, rot: np.ndarray,
+                            offset: np.ndarray) -> None:
+    """Aplica X' = scale * rot @ X + offset a câmeras e pontos."""
+    images, points = read_txt_model(src)
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / "cameras.txt", dst / "cameras.txt")
+    with open(dst / "images.txt", "w") as f:
+        for iid, img in images.items():
+            qw, qx, qy, qz = img["q"]
+            r_w2c = quat_to_rot(qx, qy, qz, qw) @ rot.T
+            t = scale * img["t"] - r_w2c @ offset
+            w, x, y, z = rot_to_quat_wxyz(r_w2c)
+            f.write(f"{iid} {w} {x} {y} {z} {t[0]} {t[1]} {t[2]} {img['cam']} {img['name']}\n{img['pts']}\n")
+    with open(dst / "points3D.txt", "w") as f:
+        for pid, xyz, rest in points:
+            p = scale * rot @ xyz + offset
+            f.write(f"{pid} {p[0]} {p[1]} {p[2]} {' '.join(rest)}\n")
+
+
+def rotation_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Rotação que leva o vetor unitário a até b."""
+    a = a / np.linalg.norm(a)
+    b = b / np.linalg.norm(b)
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    if c < -0.999999:
+        axis = np.cross(a, [1.0, 0, 0])
+        if np.linalg.norm(axis) < 1e-6:
+            axis = np.cross(a, [0, 1.0, 0])
+        axis /= np.linalg.norm(axis)
+        return 2 * np.outer(axis, axis) - np.eye(3)
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + vx + vx @ vx / (1 + c)
+
+
+def metric_alignment(images: dict, frames: list[dict]) -> tuple[float, np.ndarray, dict]:
+    """
+    Calcula a escala métrica e a direção "para cima" do modelo do COLMAP usando
+    só os trechos em que o ARCore se comportou bem:
+      - escala: razão entre deslocamentos curtos do ARCore e do COLMAP (mediana);
+      - para cima: gravidade do ARCore (vem do acelerômetro, é confiável mesmo
+        quando a posição se perde).
+    """
+    by_name = {Path(f["image"]).name: f for f in frames}
+    reg = []
+    for img in images.values():
+        fr = by_name.get(img["name"])
+        if fr:
+            reg.append((fr["index"], fr, img))
+    reg.sort(key=lambda x: x[0])
+
+    ratios = []
+    for k in range(len(reg)):
+        for j in range(k + 1, min(k + 6, len(reg))):
+            fa, fb = reg[k][1], reg[j][1]
+            dt = (fb["timestamp_ns"] - fa["timestamp_ns"]) / 1e9
+            da = float(np.linalg.norm(np.subtract(fb["t"], fa["t"])))
+            dc = float(np.linalg.norm(camera_center(reg[j][2]) - camera_center(reg[k][2])))
+            if dt <= 0 or dc <= 1e-9:
+                continue
+            if 0.1 <= da <= 1.5 and da / dt <= 1.0:
+                ratios.append(da / dc)
+
+    info = {"pares_para_escala": len(ratios)}
+    scale = 1.0
+    if len(ratios) >= 10:
+        r = np.array(ratios)
+        med = float(np.median(r))
+        good = r[np.abs(r - med) < 0.25 * med]
+        if len(good) >= 10:
+            scale = float(np.median(good))
+            info["dispersao_escala_pct"] = round(float(np.std(good) / scale * 100), 1)
+    info["escala_confiavel"] = scale != 1.0
+
+    ups = []
+    for _, fr, img in reg:
+        r_c2w_ar = quat_to_rot(*fr["q_xyzw"]) @ GL_TO_CV
+        qw, qx, qy, qz = img["q"]
+        r_c2w_col = quat_to_rot(qx, qy, qz, qw).T
+        # "Para cima" no sistema do COLMAP visto por esta câmera.
+        up_cam = r_c2w_ar.T @ np.array([0.0, 1.0, 0.0])
+        ups.append(r_c2w_col @ up_cam)
+    up = np.median(np.array(ups), axis=0) if ups else np.array([0.0, 1.0, 0.0])
+    if np.linalg.norm(up) < 1e-6:
+        up = np.array([0.0, 1.0, 0.0])
+    return scale, rotation_between(up, np.array([0.0, 1.0, 0.0])), info
 
 
 # ---------------------------------------------------------------------- COLMAP
@@ -210,64 +332,102 @@ def count_registered(colmap: str, model: Path, tmp: Path) -> int:
     return len(lines) // 2
 
 
-def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float) -> Path:
+def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
+               use_arcore_poses: bool) -> tuple[Path, dict]:
     colmap = find_tool("colmap")
     cdir = work / "colmap"
+    if cdir.exists():
+        shutil.rmtree(cdir)
+    cdir.mkdir(parents=True)
     images = cap / "images"
     db = cdir / "database.db"
-    cdir.mkdir(parents=True, exist_ok=True)
-    if db.exists():
-        db.unlink()
+    info: dict = {}
 
     fx = np.median([f["fx"] for f in frames]); fy = np.median([f["fy"] for f in frames])
     cx = np.median([f["cx"] for f in frames]); cy = np.median([f["cy"] for f in frames])
 
-    log("COLMAP 1/6: extraindo pontos de interesse das fotos")
+    log("COLMAP 1/5: extraindo pontos de interesse das fotos")
     run([colmap, "feature_extractor",
          "--database_path", db, "--image_path", images,
          "--ImageReader.camera_model", "PINHOLE",
          "--ImageReader.single_camera", "1",
          "--ImageReader.camera_params", f"{fx},{fy},{cx},{cy}"])
 
-    log("COLMAP 2/6: comparando as fotos entre si")
-    if len(frames) <= 300:
+    log(f"COLMAP 2/5: comparando as {len(frames)} fotos entre si (é a etapa mais longa)")
+    if len(frames) <= 1000:
         run([colmap, "exhaustive_matcher", "--database_path", db])
     else:
         run([colmap, "sequential_matcher", "--database_path", db,
-             "--SequentialMatching.overlap", "30"])
+             "--SequentialMatching.overlap", "50"])
 
-    log("COLMAP 3/6: triangulando com as poses do ARCore")
-    known = cdir / "sparse_arcore"
-    ref = cdir / "posicoes_arcore.txt"
-    write_known_model(db, frames, known, scale, ref)
-    tri = cdir / "sparse_tri"
-    tri.mkdir(exist_ok=True)
-    run([colmap, "point_triangulator", "--database_path", db, "--image_path", images,
-         "--input_path", known, "--output_path", tri])
-    final = tri
+    if use_arcore_poses:
+        log("COLMAP 3/5: triangulando com as poses do ARCore")
+        known = cdir / "sparse_arcore"
+        write_known_model(db, frames, known, scale, cdir / "posicoes_arcore.txt")
+        model = cdir / "sparse_tri"
+        model.mkdir()
+        run([colmap, "point_triangulator", "--database_path", db, "--image_path", images,
+             "--input_path", known, "--output_path", model])
+        txt = cdir / "modelo_txt"
+        txt.mkdir()
+        run([colmap, "model_converter", "--input_path", model, "--output_path", txt,
+             "--output_type", "TXT"])
+        final = txt
+    else:
+        log("COLMAP 3/5: calculando a posição de cada foto (fotogrametria)")
+        sparse = cdir / "sparse"
+        sparse.mkdir()
+        run([colmap, "mapper", "--database_path", db, "--image_path", images,
+             "--output_path", sparse])
+        # O mapper pode gerar mais de um pedaço; usa o que tem mais fotos.
+        best, best_n, raw_txt = None, -1, None
+        for sub in sorted(p for p in sparse.iterdir() if p.is_dir()):
+            txt = cdir / f"modelo_txt_{sub.name}"
+            txt.mkdir()
+            run([colmap, "model_converter", "--input_path", sub, "--output_path", txt,
+                 "--output_type", "TXT"])
+            n = len(read_txt_model(txt)[0])
+            log(f"  pedaço {sub.name}: {n} fotos")
+            if n > best_n:
+                best, best_n, raw_txt = sub, n, txt
+        if raw_txt is None:
+            raise SystemExit("O COLMAP não conseguiu montar o modelo. As fotos têm pouca sobreposição ou estão borradas.")
+        info["pedacos"] = len([p for p in sparse.iterdir() if p.is_dir()])
 
-    log("COLMAP 4/6: refinando posições das fotos")
-    ba = cdir / "sparse_ba"
-    ba.mkdir(exist_ok=True)
-    if run([colmap, "bundle_adjuster", "--input_path", tri, "--output_path", ba], allow_fail=True):
-        log("COLMAP 5/6: realinhando ao sistema métrico do ARCore")
-        aligned = cdir / "sparse_alinhado"
-        aligned.mkdir(exist_ok=True)
-        if run([colmap, "model_aligner", "--input_path", ba, "--output_path", aligned,
-                "--ref_images_path", ref, "--ref_is_gps", "0",
-                "--alignment_max_error", "0.3"], allow_fail=True):
-            final = aligned
+        log("COLMAP 4/5: escala métrica e nivelamento pelo ARCore")
+        imgs, pts = read_txt_model(raw_txt)
+        s_metric, rot, align = metric_alignment(imgs, frames)
+        info.update(align)
+        total = s_metric * scale
+        if not align["escala_confiavel"]:
+            log("  [aviso] O ARCore não teve trechos confiáveis: a escala do modelo é arbitrária.")
+            log("          Corrija no Blender medindo uma distância conhecida.")
+        else:
+            log(f"  escala calculada com {align['pares_para_escala']} pares de fotos "
+                f"(variação {align.get('dispersao_escala_pct', '?')}%)")
+        # Centraliza no meio do cômodo, com o ponto mais baixo (chão) em Y = 0.
+        if pts:
+            xyz = np.array([total * rot @ p for _, p, _ in pts])
+            center = np.median(xyz, axis=0)
+            floor = np.percentile(xyz[:, 1], 2)
+            offset = np.array([-center[0], -floor, -center[2]])
+        else:
+            offset = np.zeros(3)
+        final = cdir / "modelo_metrico"
+        write_transformed_model(raw_txt, final, total, rot, offset)
+        info["fator_escala_total"] = total
 
-    registered = count_registered(colmap, final, cdir / "modelo_txt")
+    registered = len(read_txt_model(final)[0])
+    info["fotos_no_modelo"] = registered
     log(f"  {registered} de {len(frames)} fotos usadas no modelo")
 
-    log("COLMAP 6/6: corrigindo distorção das fotos para a etapa densa")
+    log("COLMAP 5/5: corrigindo distorção das fotos para a etapa densa")
     dense = work / "denso"
     if dense.exists():
         shutil.rmtree(dense)
     run([colmap, "image_undistorter", "--image_path", images, "--input_path", final,
          "--output_path", dense, "--output_type", "COLMAP"])
-    return dense
+    return dense, info
 
 
 # --------------------------------------------------------------------- OpenMVS
@@ -349,6 +509,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Gera o modelo 3D a partir de uma captura do Scan3D.")
     ap.add_argument("captura", type=Path, help=".zip exportado pelo app ou pasta da captura")
     ap.add_argument("--e57", action="store_true", help="também exporta a nuvem de pontos em E57")
+    ap.add_argument("--usar-poses-arcore", action="store_true",
+                    help="usa as posições do ARCore direto (mais rápido, só se o rastreamento foi bom)")
     ap.add_argument("--detalhe", type=int, default=1, choices=[0, 1, 2],
                     help="0 = máximo (mais lento), 1 = padrão, 2 = rápido")
     args = ap.parse_args()
@@ -366,14 +528,13 @@ def main() -> None:
     log(f"{len(frames)} fotos encontradas")
 
     scale, calib = scale_from_calibration(cap)
-    if calib:
-        log(f"Escala corrigida pelas medidas de trena: fator {scale:.4f}")
-        for m in calib:
-            log(f"  real {m['real_cm']} cm | ARCore {m['arcore_cm']} cm | corrigido {m['corrigido_cm']} cm")
-    else:
-        log("Sem medidas de trena: usando a escala do ARCore")
+    for m in calib:
+        status = "usada" if m["usada"] else "DESCARTADA (ARCore estava perdido)"
+        log(f"Medida de trena: real {m['real_cm']} cm | ARCore {m['arcore_cm']} cm | {status}")
+    if scale != 1.0:
+        log(f"Correção de escala pela trena: fator {scale:.4f}")
 
-    dense = run_colmap(cap, frames, work, scale)
+    dense, colmap_info = run_colmap(cap, frames, work, scale, args.usar_poses_arcore)
     mvs = run_openmvs(dense, work, args.detalhe)
 
     dest = ROOT / "resultados" / name
@@ -382,7 +543,8 @@ def main() -> None:
     report = {
         "captura": name,
         "fotos": len(frames),
-        "fator_escala": scale,
+        "correcao_trena": scale,
+        "colmap": colmap_info,
         "medidas_trena": calib,
         "arquivos": produced,
         "minutos": round(minutes, 1),

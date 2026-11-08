@@ -35,10 +35,17 @@ class KeyframeSelector {
     var tooFast = false
         private set
 
+    /** Rastreamento instável: o ARCore "pulou" de posição. */
+    var unstable = true
+        private set
+    private var stableSince = 0L
+
     fun reset() {
         lastKeyPose = null
         prevPose = null
         tooFast = false
+        unstable = true
+        stableSince = 0L
     }
 
     /** Atualiza a velocidade com o quadro atual e diz se é hora de capturar. */
@@ -49,10 +56,14 @@ class KeyframeSelector {
             val speed = distance(pose, prev) / dt
             val angSpeed = angleDeg(pose, prev) / dt
             tooFast = speed > MAX_SPEED_M_S || angSpeed > MAX_ANG_SPEED_DEG_S
+            // Ninguém anda a mais de 2 m/s com o celular: é o ARCore se perdendo.
+            if (speed > JUMP_SPEED_M_S) stableSince = 0L
         }
+        if (stableSince == 0L) stableSince = timestampNs
+        unstable = timestampNs - stableSince < STABLE_NS
         prevPose = pose
         prevTime = timestampNs
-        if (tooFast) return false
+        if (tooFast || unstable) return false
 
         val last = lastKeyPose ?: return true
         if (timestampNs - lastKeyTime < MIN_INTERVAL_NS) return false
@@ -70,6 +81,9 @@ class KeyframeSelector {
         private const val MIN_INTERVAL_NS = 300_000_000L
         private const val MAX_SPEED_M_S = 0.5f
         private const val MAX_ANG_SPEED_DEG_S = 40f
+        private const val JUMP_SPEED_M_S = 2f
+        /** Exige 2 s de rastreamento estável antes de voltar a fotografar. */
+        private const val STABLE_NS = 2_000_000_000L
     }
 }
 

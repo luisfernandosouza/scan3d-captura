@@ -27,6 +27,12 @@ Opção `--detalhe`: `0` = máximo (mais lento), `1` = padrão, `2` = rápido pa
 File > Import > Wavefront (.obj) e escolha `modelo.obj`. As unidades estão em metros e o Blender já ajusta os eixos.
 Para ver a textura, mude a visualização da janela 3D para **Material Preview**.
 
+## Como as posições são calculadas
+
+O COLMAP calcula a posição de cada foto só a partir das próprias fotos (fotogrametria). O ARCore entra apenas para dar a escala em metros e para saber onde é "para cima", usando somente os trechos da captura em que o rastreamento dele estava estável. Se o ARCore não teve nenhum trecho confiável, o modelo sai em escala arbitrária: no Blender, meça uma distância conhecida e ajuste a escala.
+
+Se o rastreamento foi bom do começo ao fim, `--usar-poses-arcore` pula o cálculo das posições e termina mais rápido.
+
 ## Fidelidade
 
 - A malha é gerada sem fechar buracos: o que não foi fotografado fica vazio, nada é inventado.
