@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 TOOLS = ROOT / "ferramentas"
 
 # ARCore usa câmera estilo OpenGL (+Y cima, olhando para -Z).
@@ -332,17 +333,7 @@ def count_registered(colmap: str, model: Path, tmp: Path) -> int:
     return len(lines) // 2
 
 
-def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
-               use_arcore_poses: bool) -> tuple[Path, dict]:
-    colmap = find_tool("colmap")
-    cdir = work / "colmap"
-    if cdir.exists():
-        shutil.rmtree(cdir)
-    cdir.mkdir(parents=True)
-    images = cap / "images"
-    db = cdir / "database.db"
-    info: dict = {}
-
+def extract_and_match(colmap: str, db: Path, images: Path, frames: list[dict]) -> None:
     fx = np.median([f["fx"] for f in frames]); fy = np.median([f["fy"] for f in frames])
     cx = np.median([f["cx"] for f in frames]); cy = np.median([f["cy"] for f in frames])
 
@@ -360,6 +351,28 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
         run([colmap, "sequential_matcher", "--database_path", db,
              "--SequentialMatching.overlap", "50"])
 
+
+def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
+               use_arcore_poses: bool, use_ai: bool = True,
+               reuse: bool = False) -> tuple[Path, dict]:
+    colmap = find_tool("colmap")
+    cdir = work / "colmap"
+    reuse = reuse and not use_arcore_poses and (cdir / "sparse").is_dir()
+    if reuse:
+        log("Reaproveitando a comparação de fotos e as posições já calculadas")
+        for old in list(cdir.glob("modelo_txt*")) + [cdir / "modelo_metrico"]:
+            shutil.rmtree(old, ignore_errors=True)
+    else:
+        if cdir.exists():
+            shutil.rmtree(cdir)
+        cdir.mkdir(parents=True)
+    images = cap / "images"
+    db = cdir / "database.db"
+    info: dict = {}
+
+    if not reuse:
+        extract_and_match(colmap, db, images, frames)
+
     if use_arcore_poses:
         log("COLMAP 3/5: triangulando com as poses do ARCore")
         known = cdir / "sparse_arcore"
@@ -374,11 +387,13 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
              "--output_type", "TXT"])
         final = txt
     else:
-        log("COLMAP 3/5: calculando a posição de cada foto (fotogrametria)")
+        if not reuse:
+            log("COLMAP 3/5: calculando a posição de cada foto (fotogrametria)")
         sparse = cdir / "sparse"
-        sparse.mkdir()
-        run([colmap, "mapper", "--database_path", db, "--image_path", images,
-             "--output_path", sparse])
+        if not reuse:
+            sparse.mkdir()
+            run([colmap, "mapper", "--database_path", db, "--image_path", images,
+                 "--output_path", sparse])
         # O mapper pode gerar mais de um pedaço; usa o que tem mais fotos.
         best, best_n, raw_txt = None, -1, None
         for sub in sorted(p for p in sparse.iterdir() if p.is_dir()):
@@ -415,6 +430,28 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
             offset = np.zeros(3)
         final = cdir / "modelo_metrico"
         write_transformed_model(raw_txt, final, total, rot, offset)
+        info["escala_fonte"] = "arcore" if align["escala_confiavel"] else "nenhuma"
+
+        if use_ai:
+            import escala_ia
+            if escala_ia.available():
+                log("  Conferindo a escala com a IA de profundidade métrica")
+                try:
+                    k, ai_info = escala_ia.estimate_scale(final, images, read_txt_model, quat_to_rot, log=log)
+                except Exception as e:  # a IA é opcional: nunca derruba o processamento
+                    k, ai_info = None, {"erro_ia": str(e)}
+                info.update(ai_info)
+                if k:
+                    log(f"  IA: o modelo precisa ser multiplicado por {k:.3f} "
+                        f"(variação entre fotos {ai_info.get('dispersao_ia_pct', '?')}%)")
+                    total *= k
+                    offset = offset * k
+                    write_transformed_model(raw_txt, final, total, rot, offset)
+                    info["escala_fonte"] = "ia"
+                else:
+                    log("  [aviso] A IA não teve fotos suficientes; mantendo a escala anterior.")
+            else:
+                log("  (IA de escala não instalada: rode instalar_ia.bat para ativar)")
         info["fator_escala_total"] = total
 
     registered = len(read_txt_model(final)[0])
@@ -558,6 +595,10 @@ def main() -> None:
                     help="usa as posições do ARCore direto (mais rápido, só se o rastreamento foi bom)")
     ap.add_argument("--so-denso", action="store_true",
                     help="reaproveita as posições de um processamento anterior e refaz só a parte densa")
+    ap.add_argument("--reaproveitar", action="store_true",
+                    help="reaproveita a comparação de fotos e as posições de um processamento anterior")
+    ap.add_argument("--sem-ia", action="store_true",
+                    help="não usa a IA de profundidade para conferir a escala")
     ap.add_argument("--cpu", action="store_true",
                     help="usa o OpenMVS na CPU para a nuvem densa (mais lento)")
     ap.add_argument("--escala", type=float, default=1.0,
@@ -596,7 +637,9 @@ def main() -> None:
         (dense / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
         (dense / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
     else:
-        dense, colmap_info = run_colmap(cap, frames, work, scale * args.escala, args.usar_poses_arcore)
+        dense, colmap_info = run_colmap(cap, frames, work, scale * args.escala,
+                                        args.usar_poses_arcore, not args.sem_ia,
+                                        reuse=args.reaproveitar)
     mvs = None if args.cpu else run_dense_gpu(dense, work, args.detalhe)
     if mvs is None:
         if not args.cpu:

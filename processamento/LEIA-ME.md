@@ -33,6 +33,13 @@ O COLMAP calcula a posição de cada foto só a partir das próprias fotos (foto
 
 Se o rastreamento foi bom do começo ao fim, `--usar-poses-arcore` pula o cálculo das posições e termina mais rápido.
 
+## IA de escala (opcional, recomendada)
+
+Dê dois cliques em `instalar_ia.bat` (uma vez, uns 5 GB). A partir daí, o processamento usa a IA Depth Anything V2 Metric, rodando na sua placa de vídeo, para medir a distância real de cada foto e colocar o modelo em metros, sem depender do ARCore. A IA só serve de régua: ela não cria nem altera a geometria.
+
+Para refazer só a escala e a parte densa de uma captura já processada, sem repetir a comparação de fotos:
+`processar.bat quarto.zip --reaproveitar`
+
 ## Fidelidade
 
 - A malha é gerada sem fechar buracos: o que não foi fotografado fica vazio, nada é inventado.
