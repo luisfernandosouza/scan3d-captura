@@ -12,6 +12,7 @@ import android.os.SystemClock
 import android.text.InputType
 import android.view.MotionEvent
 import android.view.Surface
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -22,6 +23,9 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.CameraConfig
 import com.google.ar.core.CameraConfigFilter
@@ -86,6 +90,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        applySafeArea()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         surfaceView = findViewById(R.id.surfaceView)
@@ -112,6 +117,25 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         recordButton.setOnClickListener { if (recording) stopRecording() else startRecording() }
         measureButton.setOnClickListener { startMeasuring() }
         shareButton.setOnClickListener { exportLastSession() }
+    }
+
+    /**
+     * Desenha a câmera na tela inteira, mas mantém os textos e botões fora da
+     * barra de status, do recorte da câmera frontal e da barra de navegação.
+     */
+    private fun applySafeArea() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val top = findViewById<View>(R.id.topPanel)
+        val bottom = findViewById<View>(R.id.bottomPanel)
+        val pad = (12 * resources.displayMetrics.density).toInt()
+        ViewCompat.setOnApplyWindowInsetsListener(findViewById(android.R.id.content)) { _, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            top.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad)
+            bottom.setPadding(pad + bars.left, pad, pad + bars.right, pad + bars.bottom)
+            insets
+        }
     }
 
     override fun onResume() {

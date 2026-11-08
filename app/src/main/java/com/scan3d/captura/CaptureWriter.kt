@@ -218,5 +218,5 @@ class CaptureWriter(private val baseDir: File) {
 }
 
 object BuildConfigInfo {
-    const val VERSION = "0.1.0"
+    const val VERSION = "0.1.1"
 }
