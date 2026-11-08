@@ -78,15 +78,30 @@ def load_model(log=print):
     weights = hf_hub_download(MODEL_ID, "model.safetensors")
     state = read_safetensors(Path(weights))
     log(f"  pesos lidos: {len(state)} tensores")
-    # O transformers renomeia sozinho os pesos de versões antigas quando
-    # recebe o state_dict pronto (sem abrir o arquivo com a biblioteca nativa).
-    from transformers import AutoConfig
+    # Converte nomes antigos de camadas para os do transformers atual e carrega
+    # na thread principal (o carregador paralelo do transformers quebra no seu
+    # Python 3.15 + Windows).
+    from transformers import AutoConfig, DepthAnythingForDepthEstimation
+    renames = [("attention.attention.query", "attention.q_proj"),
+               ("attention.attention.key", "attention.k_proj"),
+               ("attention.attention.value", "attention.v_proj"),
+               ("attention.output.dense", "attention.o_proj")]
     config = AutoConfig.from_pretrained(MODEL_ID)
-    from transformers import DepthAnythingForDepthEstimation
-    model, info = DepthAnythingForDepthEstimation.from_pretrained(
-        None, config=config, state_dict=state, output_loading_info=True)
-    if info.get("missing_keys"):
-        raise RuntimeError(f"pesos faltando: {list(info['missing_keys'])[:5]}")
+    model = DepthAnythingForDepthEstimation(config)
+    expected = set(model.state_dict().keys())
+    fixed = {}
+    for k, v in state.items():
+        if k not in expected:
+            for old, new in renames:
+                if old in k and k.replace(old, new) in expected:
+                    k = k.replace(old, new)
+                    break
+        fixed[k] = v
+    missing, unexpected = model.load_state_dict(fixed, strict=False)
+    if missing:
+        raise RuntimeError(f"pesos faltando: {list(missing)[:5]}")
+    if unexpected:
+        log(f"  (ignorando {len(unexpected)} pesos extras)")
     log("  passo 4/4: enviando o modelo para " + str(device))
     model = model.to(device).eval()
 
