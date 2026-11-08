@@ -35,6 +35,33 @@ def _upright_turns(r_w2c: np.ndarray) -> int:
     return 1 if ux > 0 else 3
 
 
+def read_safetensors(path: Path) -> dict:
+    """
+    Lê um arquivo .safetensors sem a biblioteca safetensors (que quebra em
+    alguns Windows). Formato: 8 bytes com o tamanho do cabeçalho, cabeçalho
+    JSON com tipo/forma/posição de cada tensor, e depois os dados brutos.
+    """
+    import json
+    import struct
+    import torch
+
+    dtypes = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16,
+              "I64": torch.int64, "I32": torch.int32, "U8": torch.uint8, "BOOL": torch.bool}
+    data = path.read_bytes()
+    (n,) = struct.unpack("<Q", data[:8])
+    header = json.loads(data[8:8 + n])
+    base = 8 + n
+    out = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        start, end = info["data_offsets"]
+        buf = bytearray(data[base + start: base + end])
+        t = torch.frombuffer(buf, dtype=dtypes[info["dtype"]]) if buf else torch.empty(0, dtype=dtypes[info["dtype"]])
+        out[name] = t.reshape(info["shape"]).clone()
+    return out
+
+
 def load_model(log=print):
     """Carrega o modelo passo a passo (cada passo no log, para achar falhas)."""
     import os
@@ -46,8 +73,17 @@ def load_model(log=print):
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
     log("  passo 2/4: carregando o processador de imagens")
     processor = AutoImageProcessor.from_pretrained(MODEL_ID)
-    log("  passo 3/4: carregando os pesos do modelo")
-    model = AutoModelForDepthEstimation.from_pretrained(MODEL_ID, use_safetensors=True)
+    log("  passo 3/4: carregando os pesos do modelo (leitor em Python puro)")
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig
+    weights = hf_hub_download(MODEL_ID, "model.safetensors")
+    config = AutoConfig.from_pretrained(MODEL_ID)
+    model = AutoModelForDepthEstimation.from_config(config)
+    state = read_safetensors(Path(weights))
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        raise RuntimeError(f"pesos faltando no arquivo: {missing[:5]}")
+    log(f"  pesos lidos: {len(state)} tensores")
     log("  passo 4/4: enviando o modelo para " + str(device))
     model = model.to(device).eval()
 
