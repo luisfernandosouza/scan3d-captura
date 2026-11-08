@@ -366,6 +366,66 @@ def run_ai_scale(model_dir: Path, images: Path, out: Path) -> tuple[float | None
     return data["k"], data["info"]
 
 
+def sharpness(path: Path) -> float:
+    """Nitidez da foto: variância do Laplaciano numa versão reduzida (maior = mais nítida)."""
+    from PIL import Image
+    img = Image.open(path).convert("L")
+    img.thumbnail((640, 640))
+    a = np.asarray(img, dtype=np.float32)
+    lap = (a[1:-1, :-2] + a[1:-1, 2:] + a[:-2, 1:-1] + a[2:, 1:-1] - 4 * a[1:-1, 1:-1])
+    return float(lap.var())
+
+
+def select_frames(cap: Path, frames: list[dict], work: Path, max_photos: int) -> tuple[Path, list[dict], dict]:
+    """
+    Descarta fotos borradas e repetidas: em cada trecho de fotos seguidas,
+    fica só a mais nítida, e fotos bem abaixo da nitidez do entorno saem.
+    Devolve uma pasta de captura só com as fotos escolhidas.
+    """
+    import os
+    log(f"Avaliando a nitidez de {len(frames)} fotos")
+    sharp = [sharpness(cap / f["image"]) for f in frames]
+    keep = []
+    for i, f in enumerate(frames):
+        lo, hi = max(0, i - 7), min(len(frames), i + 8)
+        local = float(np.median(sharp[lo:hi]))
+        if sharp[i] >= 0.6 * local:
+            keep.append(i)
+    blurry = len(frames) - len(keep)
+    n_groups = min(max_photos, len(keep))
+    chosen = []
+    for block in np.array_split(np.array(keep), n_groups):
+        if len(block):
+            chosen.append(int(max(block, key=lambda i: sharp[i])))
+
+    sel = work / "selecao"
+    if sel.exists():
+        shutil.rmtree(sel)
+    (sel / "images").mkdir(parents=True)
+    selected = [frames[i] for i in chosen]
+    for f in selected:
+        src, dst = cap / f["image"], sel / f["image"]
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+    log(f"  {blurry} fotos borradas descartadas; {len(selected)} fotos escolhidas de {len(frames)}")
+    return sel, selected, {"fotos_borradas": blurry, "fotos_escolhidas": len(selected)}
+
+
+def limit_dense_views(dense: Path, max_views: int, neighbors: int) -> int:
+    """Usa só parte das fotos (bem espalhadas) na etapa densa e menos vizinhas por foto."""
+    stereo = dense / "stereo"
+    lines = [l.strip() for l in (stereo / "patch-match.cfg").read_text().splitlines() if l.strip()]
+    names = lines[0::2]
+    idx = sorted(set(np.linspace(0, len(names) - 1, min(max_views, len(names))).astype(int)))
+    chosen = [names[i] for i in idx]
+    (stereo / "patch-match.cfg").write_text(
+        "".join(f"{n}\n__auto__, {neighbors}\n" for n in chosen))
+    (stereo / "fusion.cfg").write_text("".join(f"{n}\n" for n in chosen))
+    return len(chosen)
+
+
 def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
                use_arcore_poses: bool, use_ai: bool = True,
                reuse: bool = False) -> tuple[Path, dict]:
@@ -521,12 +581,20 @@ def run_dense_gpu(dense: Path, work: Path, detalhe: int) -> Path | None:
         shutil.rmtree(mvs)
     mvs.mkdir()
     max_size = {0: 3000, 1: 2000, 2: 1000}[detalhe]
+    views = {0: 250, 1: 150, 2: 100}[detalhe]
+    neighbors = {0: 20, 1: 10, 2: 8}[detalhe]
+    iterations = {0: 5, 1: 3, 2: 3}[detalhe]
+    samples = {0: 15, 1: 10, 2: 8}[detalhe]
+    used = limit_dense_views(dense, views, neighbors)
+    log(f"  etapa densa com {used} fotos, {neighbors} vizinhas por foto")
 
     log("Denso 1/4: profundidade de cada foto (placa de vídeo, é a etapa mais longa)")
     if not run([colmap, "patch_match_stereo", "--workspace_path", dense,
                 "--workspace_format", "COLMAP",
                 "--PatchMatchStereo.max_image_size", str(max_size),
-                "--PatchMatchStereo.geom_consistency", "true"], allow_fail=True):
+                "--PatchMatchStereo.geom_consistency", "true",
+                "--PatchMatchStereo.num_iterations", str(iterations),
+                "--PatchMatchStereo.num_samples", str(samples)], allow_fail=True):
         return None
 
     log("Denso 2/4: juntando tudo numa nuvem de pontos")
@@ -637,6 +705,8 @@ def main() -> None:
     ap.add_argument("--e57", action="store_true", help="também exporta a nuvem de pontos em E57")
     ap.add_argument("--usar-poses-arcore", action="store_true",
                     help="usa as posições do ARCore direto (mais rápido, só se o rastreamento foi bom)")
+    ap.add_argument("--max-fotos", type=int, default=250,
+                    help="máximo de fotos usadas no cálculo das posições (padrão 250)")
     ap.add_argument("--so-textura", action="store_true",
                     help="reaproveita nuvem densa e malha já prontas e refaz só a textura")
     ap.add_argument("--so-denso", action="store_true",
@@ -690,9 +760,15 @@ def main() -> None:
         (dense / "stereo" / "depth_maps").mkdir(parents=True, exist_ok=True)
         (dense / "stereo" / "normal_maps").mkdir(parents=True, exist_ok=True)
     else:
-        dense, colmap_info = run_colmap(cap, frames, work, scale * args.escala,
+        if args.reaproveitar and (work / "colmap" / "sparse").is_dir():
+            sel_cap = work / "selecao" if (work / "selecao" / "images").is_dir() else cap
+            sel_frames, sel_info = frames, {}
+        else:
+            sel_cap, sel_frames, sel_info = select_frames(cap, frames, work, args.max_fotos)
+        dense, colmap_info = run_colmap(sel_cap, sel_frames, work, scale * args.escala,
                                         args.usar_poses_arcore, not args.sem_ia,
                                         reuse=args.reaproveitar)
+        colmap_info.update(sel_info)
     if dense is not None:
         mvs = None if args.cpu else run_dense_gpu(dense, work, args.detalhe)
     if dense is not None and mvs is None:

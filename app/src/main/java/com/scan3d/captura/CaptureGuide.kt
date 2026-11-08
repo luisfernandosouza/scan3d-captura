@@ -76,8 +76,8 @@ class KeyframeSelector {
     }
 
     companion object {
-        private const val MIN_TRANSLATION_M = 0.15f
-        private const val MIN_ROTATION_DEG = 10f
+        private const val MIN_TRANSLATION_M = 0.25f
+        private const val MIN_ROTATION_DEG = 15f
         private const val MIN_INTERVAL_NS = 300_000_000L
         private const val MAX_SPEED_M_S = 0.5f
         private const val MAX_ANG_SPEED_DEG_S = 40f

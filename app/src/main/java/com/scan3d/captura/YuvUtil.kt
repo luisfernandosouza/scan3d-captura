@@ -58,4 +58,34 @@ object YuvUtil {
         }
         return out
     }
+
+    /**
+     * Nitidez da imagem (variância do Laplaciano) calculada no canal Y,
+     * pulando pixels para ser rápida. Maior = mais nítida.
+     */
+    fun sharpness(nv21: ByteArray, width: Int, height: Int, step: Int = 4): Double {
+        var sum = 0.0
+        var sumSq = 0.0
+        var n = 0
+        var y = step
+        while (y < height - step) {
+            var x = step
+            val row = y * width
+            while (x < width - step) {
+                val c = nv21[row + x].toInt() and 0xFF
+                val lap = (nv21[row + x - step].toInt() and 0xFF) +
+                    (nv21[row + x + step].toInt() and 0xFF) +
+                    (nv21[row - step * width + x].toInt() and 0xFF) +
+                    (nv21[row + step * width + x].toInt() and 0xFF) - 4 * c
+                sum += lap
+                sumSq += lap.toDouble() * lap
+                n++
+                x += step
+            }
+            y += step
+        }
+        if (n == 0) return 0.0
+        val mean = sum / n
+        return sumSq / n - mean * mean
+    }
 }

@@ -7,7 +7,7 @@ if "%~1"=="" (
 )
 for /f "delims=" %%i in ('py -3 -c "import sys; print(sys.executable)"') do set "PY=%%i"
 echo Python: %PY%
-"%PY%" -c "import numpy, plyfile" 2>nul
+"%PY%" -c "import numpy, plyfile, PIL" 2>nul
 if errorlevel 1 (
     echo Instalando bibliotecas Python que faltam...
     "%PY%" -m pip install -r requirements.txt

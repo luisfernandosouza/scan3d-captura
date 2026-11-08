@@ -77,6 +77,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private val pendingTaps = ConcurrentLinkedQueue<FloatArray>()
     private var lastSessionDir: File? = null
     private var lastUiUpdate = 0L
+    private val recentSharpness = ArrayDeque<Double>()
+    private var blurryCount = 0
 
     private val cameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -225,6 +227,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         }
         lastSessionDir = writer.start(info)
         frameIndex = 0
+        recentSharpness.clear()
+        blurryCount = 0
         keyframes.reset()
         coverage.reset()
         recording = true
@@ -417,7 +421,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             measuring -> "Modo medida: toque nos dois pontos medidos com a trena."
             keyframes.unstable -> "Estabilizando rastreamento… aponte para áreas com detalhes."
             keyframes.tooFast -> "Mais devagar! Movimento rápido borra as fotos."
-            else -> "Gravando: ${writer.count} fotos"
+            else -> "Gravando: ${writer.count} fotos" +
+                if (blurryCount > 0) " ($blurryCount tremidas descartadas)" else ""
         }
         val cov = if (recording) {
             "Paredes: ${coverage.wallCoveragePercent}% · Teto: ${coverage.ceilingShots} · " +
@@ -443,6 +448,16 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             YuvUtil.toNv21(image)
         } finally {
             image.close()
+        }
+
+        // Descarta fotos tremidas: bem menos nítidas que as últimas aceitas.
+        val sharp = YuvUtil.sharpness(nv21, w, h)
+        val reference = recentSharpness.sorted().getOrNull(recentSharpness.size / 2)
+        recentSharpness.addLast(sharp)
+        if (recentSharpness.size > 15) recentSharpness.removeFirst()
+        if (reference != null && recentSharpness.size >= 5 && sharp < 0.6 * reference) {
+            blurryCount++
+            return false
         }
 
         var depth: ShortArray? = null
