@@ -88,25 +88,29 @@ def histogram_peaks(values: np.ndarray, bin_size: float, min_count: int,
 
 
 def find_floor_ceiling(xyz: np.ndarray, normals: np.ndarray) -> tuple[float, float]:
+    """
+    Piso: o plano horizontal mais baixo que cobre uma área grande; teto: o mais alto.
+    Camas, mesas e tampos de armário também são horizontais, mas cobrem menos área
+    ou ficam entre os dois.
+    """
     horiz = np.abs(normals[:, 1]) > 0.85
-    y = xyz[horiz, 1]
-    if len(y) < 100:
-        y = xyz[:, 1]
-    peaks = histogram_peaks(y, 0.02, max(50, len(y) * 0.01), 0.5)
-    if not peaks:
+    y_all = xyz[horiz, 1]
+    xz = xyz[horiz][:, [0, 2]]
+    if len(y_all) < 100:
         return float(np.percentile(xyz[:, 1], 1)), float(np.percentile(xyz[:, 1], 99))
-    ys = sorted(p for p, _ in peaks)
-    mid = np.median(xyz[:, 1])
-    below = [p for p, c in peaks if p < mid]
-    above = [p for p, c in peaks if p > mid]
-    # Piso: o plano horizontal mais forte embaixo; teto: o mais forte em cima.
-    floor = max(((p, c) for p, c in peaks if p < mid), key=lambda pc: pc[1], default=(ys[0], 0))[0]
-    ceiling = max(((p, c) for p, c in peaks if p > mid), key=lambda pc: pc[1], default=(ys[-1], 0))[0]
-    if not below:
-        floor = float(np.percentile(xyz[:, 1], 1))
-    if not above:
+    candidates = []
+    for pos, _ in histogram_peaks(y_all, 0.02, 50, 0.15):
+        m = np.abs(y_all - pos) < 0.04
+        area = len(np.unique(np.floor(xz[m] / 0.1).astype(np.int64), axis=0)) * 0.01
+        candidates.append((pos, area))
+    if not candidates:
+        return float(np.percentile(xyz[:, 1], 1)), float(np.percentile(xyz[:, 1], 99))
+    big = max(a for _, a in candidates)
+    large = sorted(p for p, a in candidates if a >= 0.4 * big)
+    floor, ceiling = large[0], large[-1]
+    if ceiling - floor < 1.5:  # teto não capturado
         ceiling = float(np.percentile(xyz[:, 1], 99))
-    return _refine(y, floor), _refine(y, ceiling)
+    return _refine(y_all, floor), _refine(y_all, ceiling)
 
 
 def _refine(values: np.ndarray, pos: float, radius: float = 0.03) -> float:
@@ -255,6 +259,8 @@ def find_openings(xyz: np.ndarray, rot: np.ndarray, wall: dict, floor: float, ce
                 top = float(above.min())
             hh = top - bottom
             c0_m = s_a
+            if w < 0.4 or hh < 0.4:
+                continue
             if bottom < 0.15 and 1.7 <= hh <= 2.5 and 0.6 <= w <= 1.6:
                 kind = "porta"
             elif bottom >= 0.3 and top <= height - 0.05 and w <= 3.0:
