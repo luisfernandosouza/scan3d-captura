@@ -52,7 +52,9 @@ def estimate_scale(model_dir: Path, image_dir: Path, read_txt_model, quat_to_rot
     pipe = pipeline("depth-estimation", model=MODEL_ID, device=device)
 
     per_image = []
-    for iid in ids:
+    for n, iid in enumerate(ids, 1):
+        if n == 1 or n % 10 == 0:
+            log(f"  IA: foto {n} de {len(ids)}")
         img = images[iid]
         qw, qx, qy, qz = img["q"]
         r = quat_to_rot(qx, qy, qz, qw)
@@ -103,3 +105,23 @@ def estimate_scale(model_dir: Path, image_dir: Path, read_txt_model, quat_to_rot
         "fotos_ia": len(per_image),
         "dispersao_ia_pct": round(float(np.std(good) / scale * 100), 1),
     }
+
+
+def main() -> None:
+    """Roda a estimativa num processo separado: se a IA travar, o processamento continua."""
+    import faulthandler
+    import json
+    import sys
+
+    faulthandler.enable()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import processar
+
+    model_dir, image_dir, out = map(Path, sys.argv[1:4])
+    k, info = estimate_scale(model_dir, image_dir, processar.read_txt_model,
+                             processar.quat_to_rot, log=processar.log)
+    out.write_text(json.dumps({"k": k, "info": info}), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    main()

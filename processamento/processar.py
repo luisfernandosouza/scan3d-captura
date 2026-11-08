@@ -352,6 +352,20 @@ def extract_and_match(colmap: str, db: Path, images: Path, frames: list[dict]) -
              "--SequentialMatching.overlap", "50"])
 
 
+def run_ai_scale(model_dir: Path, images: Path, out: Path) -> tuple[float | None, dict]:
+    """Roda a IA em outro processo: se ela travar, o processamento segue sem ela."""
+    import os
+    out.unlink(missing_ok=True)
+    env = dict(os.environ, KMP_DUPLICATE_LIB_OK="TRUE", PYTHONUNBUFFERED="1")
+    cmd = [sys.executable, str(ROOT / "escala_ia.py"), str(model_dir), str(images), str(out)]
+    code = subprocess.run(cmd, env=env).returncode
+    if code != 0 or not out.is_file():
+        log(f"  [aviso] A IA de escala parou com código {code}. Seguindo sem ela.")
+        return None, {"erro_ia": f"codigo {code}"}
+    data = json.loads(out.read_text(encoding="utf-8"))
+    return data["k"], data["info"]
+
+
 def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
                use_arcore_poses: bool, use_ai: bool = True,
                reuse: bool = False) -> tuple[Path, dict]:
@@ -436,10 +450,7 @@ def run_colmap(cap: Path, frames: list[dict], work: Path, scale: float,
             import escala_ia
             if escala_ia.available():
                 log("  Conferindo a escala com a IA de profundidade métrica")
-                try:
-                    k, ai_info = escala_ia.estimate_scale(final, images, read_txt_model, quat_to_rot, log=log)
-                except Exception as e:  # a IA é opcional: nunca derruba o processamento
-                    k, ai_info = None, {"erro_ia": str(e)}
+                k, ai_info = run_ai_scale(final, images, cdir / "escala_ia.json")
                 info.update(ai_info)
                 if k:
                     log(f"  IA: o modelo precisa ser multiplicado por {k:.3f} "
