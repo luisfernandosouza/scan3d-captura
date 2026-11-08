@@ -117,10 +117,24 @@ def main() -> None:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import processar
 
-    model_dir, image_dir, out = map(Path, sys.argv[1:4])
+    if len(sys.argv) == 2:
+        # Modo teste: escala_ia.py <captura> usa o que já foi processado.
+        work = Path(__file__).resolve().parent / "trabalho" / sys.argv[1]
+        model_dir = work / "colmap" / "modelo_metrico"
+        sel = work / "selecao" / "images"
+        caps = sorted((work / "captura").rglob("images"))
+        image_dir = sel if sel.is_dir() else caps[0]
+        out = work / "colmap" / "escala_ia.json"
+        import torch
+        processar.log(f"torch {torch.__version__}, CUDA {torch.version.cuda}, "
+                      f"placa: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NENHUMA'}")
+        processar.log(f"modelo: {model_dir}  fotos: {image_dir}")
+    else:
+        model_dir, image_dir, out = map(Path, sys.argv[1:4])
     k, info = estimate_scale(model_dir, image_dir, processar.read_txt_model,
                              processar.quat_to_rot, log=processar.log)
     out.write_text(json.dumps({"k": k, "info": info}), encoding="utf-8")
+    processar.log(f"Resultado: fator {k} {info}")
 
 
 if __name__ == "__main__":
