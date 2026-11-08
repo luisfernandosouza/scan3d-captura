@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Processa uma captura do app Scan3D Captura e gera um modelo 3D texturizado
 em escala real, pronto para abrir no Blender.

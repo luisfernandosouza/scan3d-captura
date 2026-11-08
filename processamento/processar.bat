@@ -5,10 +5,12 @@ if "%~1"=="" (
     pause
     exit /b 1
 )
-py -3 -c "import numpy, plyfile" 2>nul
+for /f "delims=" %%i in ('py -3 -c "import sys; print(sys.executable)"') do set "PY=%%i"
+echo Python: %PY%
+"%PY%" -c "import numpy, plyfile" 2>nul
 if errorlevel 1 (
     echo Instalando bibliotecas Python que faltam...
-    py -3 -m pip install -r requirements.txt
+    "%PY%" -m pip install -r requirements.txt
 )
-py -3 processar.py "%~1"
+"%PY%" processar.py "%~1"
 pause
